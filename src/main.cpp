@@ -11,13 +11,13 @@
 #include <cstdlib>
 
 // ---------- OLED ----------
-#define SDA_PIN 42
-#define SCL_PIN 41
+#define SDA_PIN 48
+#define SCL_PIN 47
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 
 // ---------- INA219 Debug (I2C on separate bus) ----------
-#define INA_DEBUG_SDA_PIN 16
-#define INA_DEBUG_SCL_PIN 17
+#define INA_DEBUG_SDA_PIN 11
+#define INA_DEBUG_SCL_PIN 12
 TwoWire inaWire(1);
 constexpr uint8_t INA219_I2C_ADDR = 0x40;
 constexpr float INA_SHUNT_RESISTOR_OHMS = 0.1f; // Adjust to your actual shunt value
@@ -26,31 +26,31 @@ uint8_t inaReadFailStreak = 0;
 
 // ---------- Input ----------
 // Update these three pins to match your rotary wiring.
-#define ROTARY_DT_PIN 21
-#define ROTARY_CLK_PIN 20
-#define ROTARY_SW_PIN 12
+#define ROTARY_CLK_PIN 35
+#define ROTARY_DT_PIN 36
+#define ROTARY_SW_PIN 37
 constexpr bool ROTARY_INVERT_DIRECTION = false;
 constexpr int ROTARY_TRANSITIONS_PER_STEP = 4; // reduce sensitivity to avoid skipping options
 
 // ---------- Buzzer ----------
-#define BUZZER_PIN 48
+#define BUZZER_PIN 13
 
 // ---------- RC522 ----------
-#define RC522_SS 38
-#define RC522_SCK 37
-#define RC522_MOSI 36
-#define RC522_MISO 35
-#define RC522_RST 45
+#define RC522_SS 42
+#define RC522_SCK 41
+#define RC522_MOSI 40
+#define RC522_MISO 39
+#define RC522_RST 38
 
 // ---------- Motor ----------
-#define INA 4
-#define INB 5
+#define EN1 4
+#define INA 5
+#define INB 6
 
-#define INC 3
-#define IND 8
+#define EN2 16
+#define INC 7
+#define IND 15
 
-#define EN1 6
-#define EN2 15
 constexpr uint8_t MOTOR_PWM_CHANNEL = 0;
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;
 constexpr uint8_t MOTOR_PWM_RESOLUTION = 8;
