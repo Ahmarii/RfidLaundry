@@ -13,6 +13,15 @@
 #define SCL_PIN 41
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 
+// ---------- INA219 Debug (I2C on separate bus) ----------
+#define INA_DEBUG_SDA_PIN 16
+#define INA_DEBUG_SCL_PIN 17
+TwoWire inaWire(1);
+constexpr uint8_t INA219_I2C_ADDR = 0x40;
+constexpr float INA_SHUNT_RESISTOR_OHMS = 0.1f; // Adjust to your actual shunt value
+unsigned long lastInaDebugMs = 0;
+uint8_t inaReadFailStreak = 0;
+
 // ---------- Buttons ----------
 #define BTN_CANCEL 20  // red
 #define BTN_CYCLE 21   // white
@@ -36,15 +45,14 @@ constexpr uint8_t MOTOR_PWM_CHANNEL = 0;
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;
 constexpr uint8_t MOTOR_PWM_RESOLUTION = 8;
 
-
 MFRC522 mfrc522(RC522_SS, RC522_RST);
 
 // ---------- WiFi + Server ----------
-const char *WIFI_SSID = "labfundamental_2.4GHz";
-const char *WIFI_PASSWORD = "labfund1234";
-const char *SERVER_RFID_URL = "http://192.168.1.128:8080/rfid"; // Change to your Go server IP
-const char *SERVER_REGISTER_START_URL = "http://192.168.1.128:8080/register/start";
-const char *SERVER_REGISTER_ENROLL_URL = "http://192.168.1.128:8080/register/enroll";
+const char *WIFI_SSID = "North Room-2.4G.";
+const char *WIFI_PASSWORD = "paopao55";
+const char *SERVER_RFID_URL = "http://192.168.1.48:8080/rfid"; // Change to your Go server IP
+const char *SERVER_REGISTER_START_URL = "http://192.168.1.48:8080/register/start";
+const char *SERVER_REGISTER_ENROLL_URL = "http://192.168.1.48:8080/register/enroll";
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 30000;
 
 // ---------- App Data ----------
@@ -72,7 +80,8 @@ char displayUserId[24] = "---";
 // Menu
 const char *optionNames[3] = {"A", "B", "C"};
 const int optionCosts[3] = {10, 20, 30};
-const int optionSpeeds[3] = {120, 170, 255};
+const int optionSpeeds[3] = {140, 200, 255};
+constexpr int MOTOR_MIN_START_PWM = 180;
 
 // Button tracking
 bool lastCancel = HIGH;
@@ -156,6 +165,112 @@ bool pressedEdge(int pin, bool &lastState)
   return pressed;
 }
 
+bool inaReadReg16(uint8_t addr, uint8_t reg, uint16_t &out)
+{
+  inaWire.beginTransmission(addr);
+  inaWire.write(reg);
+  // Use STOP between write/read for better robustness under electrical noise.
+  if (inaWire.endTransmission(true) != 0)
+  {
+    return false;
+  }
+
+  if (inaWire.requestFrom((int)addr, 2) != 2)
+  {
+    return false;
+  }
+
+  uint8_t msb = inaWire.read();
+  uint8_t lsb = inaWire.read();
+  out = (uint16_t(msb) << 8) | lsb;
+  return true;
+}
+
+int16_t asSigned16(uint16_t raw)
+{
+  return (raw & 0x8000) ? (int16_t)(raw - 0x10000) : (int16_t)raw;
+}
+
+void initIna219Bus()
+{
+  inaWire.begin(INA_DEBUG_SDA_PIN, INA_DEBUG_SCL_PIN, 50000); // 50kHz for better noise margin near motor
+  inaWire.setTimeOut(20);
+  Serial.printf("INA219 I2C init SDA=%d SCL=%d addr=0x%02X\n", INA_DEBUG_SDA_PIN, INA_DEBUG_SCL_PIN, INA219_I2C_ADDR);
+}
+
+void debugInaToSerial()
+{
+  if (millis() - lastInaDebugMs < 1000)
+  {
+    return;
+  }
+  lastInaDebugMs = millis();
+
+  // First, check address ACK once to avoid spamming read errors on a dead bus.
+  inaWire.beginTransmission(INA219_I2C_ADDR);
+  if (inaWire.endTransmission(true) != 0)
+  {
+    inaReadFailStreak++;
+    Serial.printf("INA219 dbg: no ACK (streak=%u)\n", inaReadFailStreak);
+    if (inaReadFailStreak >= 3)
+    {
+      Serial.println("INA219 dbg: reinitializing I2C bus");
+      initIna219Bus();
+      inaReadFailStreak = 0;
+    }
+    return;
+  }
+
+  uint16_t reg1 = 0;
+  uint16_t reg2 = 0;
+  bool ok1 = inaReadReg16(INA219_I2C_ADDR, 0x01, reg1);
+  bool ok2 = inaReadReg16(INA219_I2C_ADDR, 0x02, reg2);
+
+  bool anyOk = ok1 || ok2;
+  if (!anyOk)
+  {
+    inaReadFailStreak++;
+    Serial.printf("INA219 dbg: read failed (streak=%u)\n", inaReadFailStreak);
+    if (inaReadFailStreak >= 3)
+    {
+      Serial.println("INA219 dbg: reinitializing I2C bus");
+      initIna219Bus();
+      inaReadFailStreak = 0;
+    }
+    return;
+  }
+
+  inaReadFailStreak = 0;
+  Serial.printf("INA219 dbg addr=0x%02X", INA219_I2C_ADDR);
+  if (ok1)
+    Serial.printf(" R1=%04X", reg1);
+  if (ok2)
+    Serial.printf(" R2=%04X", reg2);
+
+  // INA219-style estimation:
+  // - Shunt voltage reg (0x01): signed, 10 uV/bit
+  // - Bus voltage reg (0x02): bits [15:3], 4 mV/bit
+  if (ok1 && INA_SHUNT_RESISTOR_OHMS > 0.0f)
+  {
+    int16_t shuntRaw = asSigned16(reg1);
+    float shuntVoltV = (float)shuntRaw * 0.00001f;
+    float currentA = shuntVoltV / INA_SHUNT_RESISTOR_OHMS;
+    Serial.printf(" I=%.3fA (%.1fmA)", currentA, currentA * 1000.0f);
+    if (ok2)
+    {
+      float busVoltV = ((reg2 >> 3) * 0.004f);
+      float powerW = busVoltV * currentA;
+      Serial.printf(" P=%.3fW", powerW);
+    }
+  }
+  if (ok2)
+  {
+    float busVoltV = ((reg2 >> 3) * 0.004f);
+    Serial.printf(" Vbus=%.3fV", busVoltV);
+  }
+  Serial.println();
+}
+
 void beepQuiet(int pulses = 1, int onMs = 20, int offMs = 25)
 {
   for (int i = 0; i < pulses; i++)
@@ -176,11 +291,23 @@ void stopMotor()
 
 void runMotorForSelection(int index)
 {
+  if (index < 0 || index >= 3)
+  {
+    Serial.printf("Invalid option index=%d\n", index);
+    return;
+  }
+
+  // Prevent low PWM selections from failing to start under load.
   int speed = optionSpeeds[index];
+  if (speed < MOTOR_MIN_START_PWM)
+  {
+    speed = MOTOR_MIN_START_PWM;
+  }
+
   digitalWrite(INA, HIGH);
   digitalWrite(INB, LOW);
   ledcWrite(MOTOR_PWM_CHANNEL, speed);
-  Serial.printf("Motor running option=%s pwm=%d\n", optionNames[index], speed);
+  Serial.printf("Motor running option=%s index=%d pwm=%d\n", optionNames[index], index, speed);
 }
 
 void resetToIdle()
@@ -425,14 +552,19 @@ bool sendRegisterStartPing()
 {
   if (WiFi.status() != WL_CONNECTED)
   {
+    Serial.printf("Register start: WiFi not connected (%s), reconnecting...\n", wifiStatusText(WiFi.status()));
     connectWiFi();
   }
   if (WiFi.status() != WL_CONNECTED)
   {
+    Serial.printf("Register start: WiFi reconnect failed (%s)\n", wifiStatusText(WiFi.status()));
     return false;
   }
 
   HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  Serial.printf("Register start: POST %s\n", SERVER_REGISTER_START_URL);
   http.begin(SERVER_REGISTER_START_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -441,6 +573,10 @@ bool sendRegisterStartPing()
   String response = http.getString();
   http.end();
 
+  if (code <= 0)
+  {
+    Serial.printf("Register start -> code=%d err=%s\n", code, HTTPClient::errorToString(code).c_str());
+  }
   Serial.printf("Register start -> code=%d, body=%s\n", code, response.c_str());
   return code > 0 && code < 300;
 }
@@ -449,14 +585,19 @@ bool sendRegisterEnrollPing(const char *uid)
 {
   if (WiFi.status() != WL_CONNECTED)
   {
+    Serial.printf("Register enroll: WiFi not connected (%s), reconnecting...\n", wifiStatusText(WiFi.status()));
     connectWiFi();
   }
   if (WiFi.status() != WL_CONNECTED)
   {
+    Serial.printf("Register enroll: WiFi reconnect failed (%s)\n", wifiStatusText(WiFi.status()));
     return false;
   }
 
   HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  Serial.printf("Register enroll: POST %s\n", SERVER_REGISTER_ENROLL_URL);
   http.begin(SERVER_REGISTER_ENROLL_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -467,6 +608,10 @@ bool sendRegisterEnrollPing(const char *uid)
   String response = http.getString();
   http.end();
 
+  if (code <= 0)
+  {
+    Serial.printf("Register enroll -> code=%d err=%s\n", code, HTTPClient::errorToString(code).c_str());
+  }
   Serial.printf("Register enroll -> code=%d, body=%s\n", code, response.c_str());
   return code > 0 && code < 300;
 }
@@ -633,6 +778,9 @@ void setup()
   Wire.begin(SDA_PIN, SCL_PIN);
   u8g2.begin();
 
+  // INA219 debug bus (kept separate from OLED I2C bus)
+  initIna219Bus();
+
   // RC522 SPI
   SPI.begin(RC522_SCK, RC522_MISO, RC522_MOSI, RC522_SS);
   mfrc522.PCD_Init(RC522_SS, RC522_RST);
@@ -645,6 +793,15 @@ void setup()
 
 void loop()
 {
+  if (state == ST_RUNNING)
+  {
+    debugInaToSerial();
+  }
+  else
+  {
+    lastInaDebugMs = 0;
+  }
+
   if (WiFi.status() != WL_CONNECTED && millis() - lastWiFiRetryMs >= 10000)
   {
     lastWiFiRetryMs = millis();
@@ -808,7 +965,7 @@ void loop()
     }
 
     // Demo: auto return after 5 sec
-    if (millis() - runningStartMs >= 5000)
+    if (millis() - runningStartMs >= 10000)
     {
       resetToIdle();
     }
